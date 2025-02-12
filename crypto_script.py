@@ -1,8 +1,8 @@
 import requests
 import pandas as pd
-import openpyxl
-import schedule
 import time
+from openpyxl import load_workbook
+from datetime import datetime
 
 def fetch_crypto_data():
     url = "https://api.coingecko.com/api/v3/coins/markets"
@@ -13,38 +13,65 @@ def fetch_crypto_data():
         "page": 1,
         "sparkline": False
     }
-    response = requests.get(url, params=params)
-    data = response.json()
-    return data
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()  # Raise error for bad responses (4xx, 5xx)
+        return response.json()
+    except requests.RequestException as e:
+        print(f"⚠️ API Error: {e}")
+        return None  # Return None to indicate failure
 
-def analyze_data(data):
+def save_to_excel(data, filename="crypto_data.xlsx"):
     df = pd.DataFrame(data, columns=["name", "symbol", "current_price", "market_cap", "total_volume", "price_change_percentage_24h"])
-    top_5 = df.nlargest(5, "market_cap")
-    avg_price = df["current_price"].mean()
-    highest_change = df.loc[df["price_change_percentage_24h"].idxmax()]
-    lowest_change = df.loc[df["price_change_percentage_24h"].idxmin()]
-    return df, top_5, avg_price, highest_change, lowest_change
-
-def update_excel():
-    data = fetch_crypto_data()
-    df, top_5, avg_price, highest_change, lowest_change = analyze_data(data)
-    file_path = "crypto_data.xlsx"
+    df.rename(columns={
+        "name": "Cryptocurrency Name",
+        "symbol": "Symbol",
+        "current_price": "Current Price (USD)",
+        "market_cap": "Market Capitalization",
+        "total_volume": "24h Trading Volume",
+        "price_change_percentage_24h": "24h Price Change (%)"
+    }, inplace=True)
     
-    with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="Live Data", index=False)
-        top_5.to_excel(writer, sheet_name="Top 5", index=False)
-        summary = pd.DataFrame({
-            "Metric": ["Average Price", "Highest 24h Change", "Lowest 24h Change"],
-            "Value": [avg_price, highest_change["price_change_percentage_24h"], lowest_change["price_change_percentage_24h"]]
-        })
-        summary.to_excel(writer, sheet_name="Analysis Summary", index=False)
+    df["Timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Add timestamp
+
+    try:
+        with pd.ExcelWriter(filename, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+            df.to_excel(writer, index=False, sheet_name="Live Data")
+    except FileNotFoundError:
+        df.to_excel(filename, index=False, sheet_name="Live Data")
     
-    print("Excel updated!")
+def analyze_data(data):
+    df = pd.DataFrame(data)
+    
+    if "market_cap" in df.columns:
+        top_5 = df.nlargest(5, "market_cap")[["name", "market_cap"]]
+    else:
+        top_5 = pd.DataFrame()
+    
+    avg_price = df["current_price"].mean() if "current_price" in df.columns else 0
+    
+    if "price_change_percentage_24h" in df.columns:
+        highest_change = df.nlargest(1, "price_change_percentage_24h")[["name", "price_change_percentage_24h"]]
+        lowest_change = df.nsmallest(1, "price_change_percentage_24h")[["name", "price_change_percentage_24h"]]
+    else:
+        highest_change = lowest_change = pd.DataFrame()
 
-schedule.every(5).minutes.do(update_excel)
+    return top_5, avg_price, highest_change, lowest_change
 
-print("Script running... Press Ctrl+C to stop.")
-while True:
-    schedule.run_pending()
-    time.sleep(1)
+def main():
+    filename = "crypto_data.xlsx"
+    while True:
+        data = fetch_crypto_data()
+        if data:
+            save_to_excel(data, filename)
+            top_5, avg_price, highest_change, lowest_change = analyze_data(data)
+            print("\n🔹 Top 5 Cryptocurrencies by Market Cap:\n", top_5)
+            print("\n💰 Average Price of Top 50 Cryptocurrencies:", avg_price)
+            print("\n📈 Highest 24h % Change:\n", highest_change)
+            print("\n📉 Lowest 24h % Change:\n", lowest_change)
+        else:
+            print("⚠️ Failed to fetch data, retrying in 5 minutes...")
+        time.sleep(300)  # Wait 5 minutes before next update
 
+if __name__ == "__main__":
+    main()
